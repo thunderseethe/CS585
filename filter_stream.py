@@ -13,23 +13,33 @@ auth.set_access_token(access_token, access_secret)
 
 api = tweepy.API(auth)
 
+def _get(obj, prop):
+    """Poor man's maybe monad"""
+    return getattr(obj, prop) if obj != None and hasattr(obj, prop) else None
+
 class MyStreamListener(tweepy.StreamListener):
 
     def __init__(self, queue):
         super().__init__()
         self.queue = queue
+        self.poison_pill = ((), ())
         self.count = 0
 
     def on_error(self, status_code):
         if status_code == 420:
+            self.queue.append(self.poison_pill) 
             return False
 
     def on_status(self, status):
-        self.queue.append((status.id_str, status.text))
+        tweet = (status.id, status.text, status.in_reply_to_screen_name, status.in_reply_to_status_id, status.in_reply_to_user_id, status.retweeted, _get(_get(status, 'retweeted_status'), 'id'))
+        hashtags = [(status.id, h['text'], h['indices'][0], h['indices'][1]) for h in status.entities['hashtags']]
+        self.queue.append((tweet, hashtags))
         self.count += 1
         print("%d:\t%s" % (self.count, status.text))
 
 db_filename = 'tweets.db'
+conn = sqlite3.connect(db_filename)
+cur = conn.cursor()
 queue = deque()
 
 myStreamListener = MyStreamListener(queue)
@@ -37,8 +47,13 @@ myStream = tweepy.Stream(auth = api.auth, listener = myStreamListener)
 myStream.sample(async=True)
 
 while len(queue) != 0:
-    tweet = queue.pop()
-    cur.execute("INSERT INTO tweets VALUES (?, ?)", tweet)
+    (tweet, hashtags) = queue.pop()
+    if not tweet and not hashtags:
+        break #empty tuples denote poison pill
 
-conn.commit()
+    cur.execute("INSERT INTO tweets VALUES (?, ?, ?, ?, ?, ?, ?)", tweet)
+    cur.executemany('INSERT INTO hashtags (id, hashtag, start_index, end_index) VALUES (?, ?, ?, ?)', hashtags)
+
+    conn.commit()
+
 conn.close()
